@@ -38,6 +38,26 @@ To integrate with the Anthropic Desktop app, add the following configuration to 
   }
 }
 ```
+If this gives an error like
+``` 
+{"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude-ai","version":"0.1.0"}},"jsonrpc":"2.0","id":0}
+  error: unexpected argument '--directory' found
+```
+Then use the following config, make sure to do `uv venv`; `source .venv/bin/activate`; `uv pip install ".[dev]"` to make sure the server can be run with all dependencies. 
+
+```json
+{
+   "mcpServers": {
+      "zotero-mcp-server": {
+        "command": "bash",
+        "args": [
+          "-c",
+          "cd /Users/shahswai/personal/zotero-mcp-server && source .venv/bin/activate && python -m zotero_mcp.server"
+        ]
+      }
+    }
+  }
+```
 
 ## Example Usage
 
