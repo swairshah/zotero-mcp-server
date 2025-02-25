@@ -18,6 +18,10 @@ test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
 ]
+experimental = [
+    "marker-pdf>=1.5.5",
+    "modal>=0.73.69",
+]
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
