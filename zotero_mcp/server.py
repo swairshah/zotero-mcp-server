@@ -31,18 +31,42 @@ mcp = FastMCP(
     capabilities={"tools": True}
 )
 
-zot = zotero.Zotero(
-    int(os.environ['ZOTERO_USER_ID']),
-    "user",
-    os.environ['ZOTERO_API_KEY']
-)
-anthropic = Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+try:
+    zot = zotero.Zotero(
+        os.environ['ZOTERO_USER_ID'],
+        "user",
+        os.environ['ZOTERO_API_KEY'],
+        local=True  # use local Zotero library instead of making network calls
+    )
+    # test the connection
+    zot.items(limit=1)
+except Exception as e:
+    if "Local API is not enabled" in str(e):
+        logger.error("Zotero local API is not enabled. Please enable it in Zotero Preferences -> Advanced -> Allow other applications on this computer to communicate with Zotero.")
+        exit(1)
+    else:
+        logger.error(f"Error connecting to Zotero: {e}")
+        exit(1)
+
+anthropic = Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', '')) # Remove proxies parameter
 
 @mcp.tool()
-def search_papers(tags: List[str] = None) -> dict:
-    """Search through Zotero papers based on tags and/or text."""
+def search_papers(tags: List[str] = None, query: str = None) -> dict:
+    """Search through Zotero papers based on tags and/or text.
+    
+    Args:
+        tags: List of tags to filter by
+        query: Search query to filter by title and creator fields
+    """
     try:
-        if tags:
+        if tags and query:
+            # If both tags and query are provided, first search by query then filter by tags
+            items = zot.items(q=query)
+            # Filter for tags client-side
+            items = [item for item in items 
+                    if all(tag in [t['tag'] for t in item['data'].get('tags', [])] 
+                    for tag in tags)]
+        elif tags:
             # use a single tag for now since the API handles multiple tags differently
             items = zot.items(tag=tags[0]) if len(tags) == 1 else zot.items()
             # filter for multiple tags client-side if needed
@@ -50,6 +74,9 @@ def search_papers(tags: List[str] = None) -> dict:
                 items = [item for item in items 
                         if all(tag in [t['tag'] for t in item['data'].get('tags', [])] 
                         for tag in tags)]
+        elif query:
+            # Search by query only
+            items = zot.items(q=query)
         else:
             items = zot.items()
 
@@ -153,7 +180,51 @@ def add_note(item_key: str, note_text: str, tags: List[str] = None) -> dict:
         logger.error(f"Error adding note: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-# TODO: FIX THIS
+@mcp.tool()
+def get_pdf_content(item_key: str) -> dict:
+    """Get the PDF content for a given item.
+    
+    Args:
+        item_key: The Zotero item key
+    """
+    try:
+        # First get the item to find its attachments
+        item = zot.item(item_key)
+        
+        # Look for PDF attachment in the links
+        if 'attachment' in item['links'] and item['links']['attachment']['attachmentType'] == 'application/pdf':
+            attachment_key = item['links']['attachment']['href'].split('/')[-1]
+            # Get the PDF content
+            pdf_content = zot.file(attachment_key)
+            return {
+                'success': True,
+                'content': pdf_content,
+                'attachment_key': attachment_key
+            }
+        
+        # If not found in links, check children
+        children = zot.children(item_key)
+        for child in children:
+            if child['data'].get('itemType') == 'attachment' and child['data'].get('contentType') == 'application/pdf':
+                pdf_content = zot.file(child['key'])
+                return {
+                    'success': True,
+                    'content': pdf_content,
+                    'attachment_key': child['key']
+                }
+        
+        return {
+            'success': False,
+            'error': 'No PDF attachment found for this item'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting PDF content: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 @mcp.tool()
 def request_summary(item_key: str) -> Dict[str, Any]:
     """Request a summary for a paper."""
@@ -171,7 +242,7 @@ def request_summary(item_key: str) -> Dict[str, Any]:
         raise ValueError(str(e))
 
 if __name__ == "__main__":
-    # for local testing
+    # local testing
     load_dotenv()
     
     required_env_vars = ['ZOTERO_USER_ID']
