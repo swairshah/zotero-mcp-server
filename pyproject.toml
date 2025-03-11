@@ -11,6 +11,7 @@ dependencies = [
     "anthropic>=0.3.0",
     "pypdf>=3.0.0",
     "python-dotenv>=1.0.0",
+    "requests>=2.32.3",
 ]
 
 [project.optional-dependencies]
