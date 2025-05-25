@@ -31,21 +31,36 @@ mcp = FastMCP(
     capabilities={"tools": True}
 )
 
+# Initialize both local and remote Zotero connections
 try:
-    zot = zotero.Zotero(
+    # Local API for fast reads
+    zot_local = zotero.Zotero(
         os.environ['ZOTERO_USER_ID'],
         "user",
         os.environ['ZOTERO_API_KEY'],
-        local=True  # use local Zotero library instead of making network calls
+        local=True
     )
-    # test the connection
-    zot.items(limit=1)
+    # Test local connection
+    zot_local.items(limit=1)
+    logger.info("Local Zotero API connected successfully")
+    
+    # Remote API for writes
+    zot_remote = zotero.Zotero(
+        os.environ['ZOTERO_USER_ID'],
+        "user",
+        os.environ['ZOTERO_API_KEY'],
+        local=False
+    )
+    # Test remote connection
+    zot_remote.item_types()
+    logger.info("Remote Zotero API connected successfully")
+    
 except Exception as e:
     if "Local API is not enabled" in str(e):
         logger.error("Zotero local API is not enabled. Please enable it in Zotero Preferences -> Advanced -> Allow other applications on this computer to communicate with Zotero.")
         exit(1)
     else:
-        logger.error(f"Error connecting to Zotero: {e}")
+        logger.error(f"Error connecting to Zotero APIs: {e}")
         exit(1)
 
 anthropic = Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', '')) # Remove proxies parameter
@@ -61,14 +76,14 @@ def search_papers(tags: List[str] = None, query: str = None) -> dict:
     try:
         if tags and query:
             # If both tags and query are provided, first search by query then filter by tags
-            items = zot.items(q=query)
+            items = zot_local.items(q=query)
             # Filter for tags client-side
             items = [item for item in items 
                     if all(tag in [t['tag'] for t in item['data'].get('tags', [])] 
                     for tag in tags)]
         elif tags:
             # use a single tag for now since the API handles multiple tags differently
-            items = zot.items(tag=tags[0]) if len(tags) == 1 else zot.items()
+            items = zot_local.items(tag=tags[0]) if len(tags) == 1 else zot_local.items()
             # filter for multiple tags client-side if needed
             if len(tags) > 1:
                 items = [item for item in items 
@@ -76,9 +91,9 @@ def search_papers(tags: List[str] = None, query: str = None) -> dict:
                         for tag in tags)]
         elif query:
             # Search by query only
-            items = zot.items(q=query)
+            items = zot_local.items(q=query)
         else:
-            items = zot.items()
+            items = zot_local.items()
 
         # enhanced response with more useful information
         processed_items = []
@@ -114,7 +129,7 @@ def search_papers(tags: List[str] = None, query: str = None) -> dict:
 def get_paper_notes(item_key: str) -> Dict[str, Any]:
     """Get all notes attached to a specific paper."""
     try:
-        notes = zot.children(item_key)
+        notes = zot_local.children(item_key)
         return {
             "notes": [{
                 "key": note["key"],
@@ -130,7 +145,7 @@ def get_paper_notes(item_key: str) -> Dict[str, Any]:
 def get_paper(item_key: str) -> Dict[str, Any]:
     """Get details for a specific paper."""
     try:
-        item = zot.item(item_key)
+        item = zot_local.item(item_key)
         if not item:
             return {"status": "error", "message": "Paper not found"}
             
@@ -153,14 +168,14 @@ def get_paper(item_key: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def add_note(item_key: str, note_text: str, tags: List[str] = None) -> dict:
-    """Add a note to a specific paper."""
+    """Add a note to a specific paper using remote API."""
     try:
-        # verify the paper exists first
+        # verify the paper exists first using local API
         paper = get_paper(item_key)
         if paper.get("status") == "error":
             return paper
         
-        # create the note
+        # create the note using remote API
         template = {
             'itemType': 'note',
             'parentItem': item_key,
@@ -168,16 +183,31 @@ def add_note(item_key: str, note_text: str, tags: List[str] = None) -> dict:
             'tags': [{'tag': tag} for tag in (tags or [])]
         }
         
-        result = zot.create_items([template])
-        note_key = result.get("successful", {}).get("0", {}).get("key")
+        result = zot_remote.create_items([template])
         
-        return {
-            "status": "success",
-            "note_key": note_key,
-            "paper_title": paper["item"]["title"]
-        }
+        # Check if creation was successful
+        if result.get("successful"):
+            note_key = result.get("successful", {}).get("0", {}).get("key")
+            return {
+                "status": "success",
+                "note_key": note_key,
+                "paper_title": paper["item"]["title"],
+                "method": "remote_api"
+            }
+        elif result.get("failed"):
+            error_info = result.get("failed", {}).get("0", {})
+            return {
+                "status": "error",
+                "message": f"Remote API error: {error_info}"
+            }
+        else:
+            return {
+                "status": "error", 
+                "message": "Unknown response from remote API"
+            }
+            
     except Exception as e:
-        logger.error(f"Error adding note: {str(e)}")
+        logger.error(f"Error adding note via remote API: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 @mcp.tool()
@@ -189,34 +219,50 @@ def get_pdf_content(item_key: str) -> dict:
     """
     try:
         # First get the item to find its attachments
-        item = zot.item(item_key)
+        item = zot_local.item(item_key)
+        
+        pdf_bytes = None
+        attachment_key = None
         
         # Look for PDF attachment in the links
         if 'attachment' in item['links'] and item['links']['attachment']['attachmentType'] == 'application/pdf':
             attachment_key = item['links']['attachment']['href'].split('/')[-1]
             # Get the PDF content
-            pdf_content = zot.file(attachment_key)
+            pdf_bytes = zot_local.file(attachment_key)
+        else:
+            # If not found in links, check children
+            children = zot_local.children(item_key)
+            for child in children:
+                if child['data'].get('itemType') == 'attachment' and child['data'].get('contentType') == 'application/pdf':
+                    attachment_key = child['key']
+                    pdf_bytes = zot_local.file(child['key'])
+                    break
+        
+        if pdf_bytes is None:
             return {
-                'success': True,
-                'content': pdf_content,
-                'attachment_key': attachment_key
+                'success': False,
+                'error': 'No PDF attachment found for this item'
             }
         
-        # If not found in links, check children
-        children = zot.children(item_key)
-        for child in children:
-            if child['data'].get('itemType') == 'attachment' and child['data'].get('contentType') == 'application/pdf':
-                pdf_content = zot.file(child['key'])
-                return {
-                    'success': True,
-                    'content': pdf_content,
-                    'attachment_key': child['key']
-                }
-        
-        return {
-            'success': False,
-            'error': 'No PDF attachment found for this item'
-        }
+        # Extract text from PDF
+        try:
+            pdf_reader = PdfReader(BytesIO(pdf_bytes))
+            text_content = ""
+            for page in pdf_reader.pages:
+                text_content += page.extract_text() + "\n"
+            
+            return {
+                'success': True,
+                'text_content': text_content,
+                'attachment_key': attachment_key,
+                'page_count': len(pdf_reader.pages)
+            }
+        except Exception as pdf_error:
+            logger.error(f"Error extracting text from PDF: {pdf_error}")
+            return {
+                'success': False,
+                'error': f'Failed to extract text from PDF: {str(pdf_error)}'
+            }
         
     except Exception as e:
         logger.error(f"Error getting PDF content: {e}")
@@ -224,22 +270,6 @@ def get_pdf_content(item_key: str) -> dict:
             'success': False,
             'error': str(e)
         }
-
-@mcp.tool()
-def request_summary(item_key: str) -> Dict[str, Any]:
-    """Request a summary for a paper."""
-    try:
-        # add TODO tag to trigger summarization
-        item = zot.item(item_key)
-        tags = item["data"]["tags"]
-        if not any(tag["tag"] == TODO_TAG_NAME for tag in tags):
-            tags.append({"tag": TODO_TAG_NAME})
-            item["data"]["tags"] = tags
-            zot.update_item(item)
-        return {"status": "success", "message": "Summary requested"}
-    except Exception as e:
-        logger.error(f"Error requesting summary: {e}")
-        raise ValueError(str(e))
 
 if __name__ == "__main__":
     # local testing
