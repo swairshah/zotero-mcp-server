@@ -2,6 +2,8 @@
 
 A MCP (Model Context Protocol) server to let your MCP clients (e.g. Anthropic Claude App, Goose, possibly vscode Cline too) interact with your local Zotero repository. This server enables programmatic access to your Zotero library, allowing you to search papers, manage notes, and more.
 
+**Note**: If you don't want to set up API keys, see the [SQLite database server option](#alternative-direct-sqlite-database-access) below.
+
 ## Setup
 
 1. Install dependencies:
@@ -57,6 +59,29 @@ Then use the following config, make sure to do `uv venv`; `source .venv/bin/acti
       }
     }
   }
+```
+
+## Alternative: Direct SQLite Database Access
+
+If you prefer to bypass the Zotero API entirely and work directly with the SQLite database, use `zotero_mcp/db_server.py`. This approach gives you full control over your Zotero data without API limitations. Note that you'll need to close Zotero completely before using this method since SQLite locks the database when Zotero is running.
+
+Claude MCP config for the SQLite version:
+```json
+{
+  "mcpServers": {
+    "zotero-mcp-server": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/swair/work/code/zotero-mcp-server",
+        "run",
+        "python",
+        "-m",
+        "zotero_mcp.db_server"
+      ]
+    }
+  }
+}
 ```
 
 ## Example Usage
